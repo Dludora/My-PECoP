@@ -12,8 +12,6 @@ from utils.util import read_pkl
 from torchvision import transforms
 import torch
 from torch.utils.data import Dataset
-from PIL import Image
-import ipdb
 
 
 class MTL_Dataset(Dataset):
@@ -24,7 +22,6 @@ class MTL_Dataset(Dataset):
         self.data_root = os.path.join(args.data_root)
         # get_data
         if subset == "test":
-            print(os.path.join(self.data_root, "info/test_split_0.pkl"))
             self.dataset = read_pkl(
                 os.path.join(self.data_root, "info/test_split_0.pkl")
             )
@@ -42,7 +39,7 @@ class MTL_Dataset(Dataset):
 
         self.rgb_prefix = args.rgb_prefix
         self.clip_len = args.clip_len
-        self.max_sr = args.max_sr
+        self.max_sample_rate = args.max_sample_rate
         self.max_segment = args.max_segment
         self.fr = args.fr
         self.toPIL = transforms.ToPILImage()
@@ -63,29 +60,16 @@ class MTL_Dataset(Dataset):
             self.get_start_last_frame(sample)
         )
         # playback speed of the random clip
-        sample_rate = random.randint(1, self.max_sr)
+        sample_rate = random.randint(1, self.max_sample_rate)
         while sample_rate == self.fr:
-            sample_rate = random.randint(1, self.max_sr)
+            sample_rate = random.randint(1, self.max_sample_rate)
 
         # segment of the random clip
         segment = random.randint(1, self.max_segment)
 
-        # try:
-        #     clip_start_frame = random.randint(
-        #         sample_start_frame, sample_end_frame - self.clip_len + 1
-        #     )
-        # except:
-        #     print(sample_start_frame, sample_end_frame)
-
         # 选中的segment的起始帧和结束帧
         segment_start_frame = int((segment - 1) * (self.clip_len / self.max_segment))
         segment_last_frame = int(segment * (self.clip_len / self.max_segment))
-
-        # if index == 0:
-        #     print(sample_start_frame, sample_end_frame, sample_frame_num, end="\n")
-        #     print(sample)
-        #     print(clip_start_frame)
-        #     print(segment_start_frame, segment_last_frame)
 
         rgb_clip = self.load_clip(
             sample,

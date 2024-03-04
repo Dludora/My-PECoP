@@ -1,16 +1,29 @@
-gpu: 0,1,2,3
+gpu: 2,3
+exp_name: MTL-I3D_USDL
 height: 256
 width: 256
-pretrained_i3d_weight: /home/ksr/PECoP/model_rgb.pth
+ckpts: /home/ksr/PECoP/pretrained_weights/i3d_for_USDL.pt
 clip_len: 80
 crop_sz: 224
-lr: 0.01
-bs: 32
+
+
+# optimizer
+learn_rate: 0.01
+weight_decay: 1e-4
+momentum: 0.9
+dampening: 0
+nesterov: False
+# scheduler
+T_max: 22
+
+
+bs_train: 32
+bs_test: 64
 num_workers: 4
-epoch: 8
+epoch: 24
 max_sample_rate: 5
 max_segment: 4
-fr: 3
+fr: 1
 max_save: 100
 pf: 20
 model: i3d

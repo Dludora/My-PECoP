@@ -3,7 +3,6 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
-import ipdb
 
 
 def get_padding_shape(filter_shape, stride):
