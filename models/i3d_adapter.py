@@ -2,6 +2,10 @@ import math
 import os
 import numpy as np
 import torch
+from sqlite3 import adapters
+from typing import Callable, List, Optional
+import torch
+from torch import Tensor
 import torch.nn as nn
 
 
@@ -46,15 +50,9 @@ class Unit3Dpy(torch.nn.Module):
         padding="SAME",
         use_bias=False,
         use_bn=True,
-        loRa=False,
-        loRa_rank=0,
-        loRa_alpha=1,
-        loRa_dropout=0.0,
-        merge_weights=True,
     ):
         super(Unit3Dpy, self).__init__()
 
-        self.loRa = loRa
         self.padding = padding
         self.activation = activation
         self.use_bn = use_bn
@@ -69,7 +67,6 @@ class Unit3Dpy(torch.nn.Module):
                 "padding should be in [VALID|SAME] but got {}".format(padding)
             )
 
-        # ipdb.set_trace()
         if padding == "SAME":
             if not simplify_pad:
                 self.pad = torch.nn.ConstantPad3d(padding_shape, 0)
@@ -112,54 +109,10 @@ class Unit3Dpy(torch.nn.Module):
         if activation == "relu":
             self.activation = torch.nn.functional.relu
 
-        self.loRa_rank = loRa_rank
-        self.loRa_alpha = loRa_alpha
-        self.loRa_dropout = loRa_dropout
-        self.merge_weights = merge_weights
-        if loRa and loRa_rank > 0:
-            self.loRa_A = nn.Parameter(
-                self.conv3d.weight.new_zeros(
-                    (loRa_rank * kernel_size[0], in_channels * kernel_size[1])
-                )
-            )
-            self.loRa_B = nn.Parameter(
-                self.conv3d.weight.new_zeros(
-                    (
-                        out_channels
-                        // self.conv3d.groups
-                        * kernel_size[0] ** (self.conv3d.weight.dim() - 3),
-                        loRa_rank * kernel_size[0],
-                    )
-                )
-            )
-            self.scaling = self.loRa_alpha / self.loRa_rank
-            self.conv3d.weight.requires_grad = False
-        self.reset_parameters()
-        self.merged = False
-
-    def reset_parameters(self):
-        self.conv3d.reset_parameters()
-        if self.use_bn:
-            self.batch3d.reset_parameters()
-        if self.loRa_rank > 0 and self.loRa:
-            nn.init.kaiming_normal_(self.loRa_A, a=math.sqrt(5))
-            self.loRa_B.data.zero_()
-
     def forward(self, inp):
         if self.padding == "SAME" and self.simplify_pad is False:
             inp = self.pad(inp)
-        # loRa
-        if self.loRa_rank > 0 and not self.merged:
-            out = self.conv3d._conv_forward(
-                inp,
-                self.conv3d.weight
-                + (self.loRa_B @ self.loRa_A).view(self.conv3d.weight.shape)
-                * self.scaling,
-                self.conv3d.bias,
-            )
-        else:
-            out = self.conv3d(inp)
-        # use batch norm
+        out = self.conv3d(inp)
         if self.use_bn:
             out = self.batch3d(out)
         if self.activation is not None:
@@ -233,55 +186,21 @@ class MaxPool3dTFPadding(torch.nn.Module):
 
 
 class Mixed(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, loRa=False):
+    def __init__(self, in_channels, out_channels, adapter=True):
         super(Mixed, self).__init__()
         # Branch 0
-        self.loRa = loRa
-        if loRa:
-            lora_rank = 64
-            loRa_alpha = lora_rank * 2
-            lora_dropout = 0.5
-        else:
-            lora_rank = 0
-            loRa_alpha = 1
-            lora_dropout = 0.0
-
-        # Branch 0
-        self.branch_0 = Unit3Dpy(
-            in_channels,
-            out_channels[0],
-            kernel_size=(1, 1, 1),
-            loRa=self.loRa,
-            loRa_rank=lora_rank,
-            loRa_alpha=loRa_alpha,
-            loRa_dropout=lora_dropout,
-        )
+        self.adapter = adapter
+        self.branch_0 = Unit3Dpy(in_channels, out_channels[0], kernel_size=(1, 1, 1))
 
         # Branch 1
-        branch_1_conv1 = Unit3Dpy(
-            in_channels,
-            out_channels[1],
-            kernel_size=(1, 1, 1),
-            loRa=self.loRa,
-            loRa_rank=lora_rank,
-            loRa_alpha=loRa_alpha,
-            loRa_dropout=lora_dropout,
-        )
+        branch_1_conv1 = Unit3Dpy(in_channels, out_channels[1], kernel_size=(1, 1, 1))
         branch_1_conv2 = Unit3Dpy(
             out_channels[1], out_channels[2], kernel_size=(3, 3, 3)
         )
         self.branch_1 = torch.nn.Sequential(branch_1_conv1, branch_1_conv2)
 
         # Branch 2
-        branch_2_conv1 = Unit3Dpy(
-            in_channels,
-            out_channels[3],
-            kernel_size=(1, 1, 1),
-            loRa=self.loRa,
-            loRa_rank=lora_rank,
-            loRa_alpha=loRa_alpha,
-            loRa_dropout=lora_dropout,
-        )
+        branch_2_conv1 = Unit3Dpy(in_channels, out_channels[3], kernel_size=(1, 1, 1))
         branch_2_conv2 = Unit3Dpy(
             out_channels[3], out_channels[4], kernel_size=(3, 3, 3)
         )
@@ -291,44 +210,35 @@ class Mixed(torch.nn.Module):
         branch_3_pool = MaxPool3dTFPadding(
             kernel_size=(3, 3, 3), stride=(1, 1, 1), padding="SAME"
         )
-        branch_3_conv2 = Unit3Dpy(
-            in_channels,
-            out_channels[5],
-            kernel_size=(1, 1, 1),
-            loRa=self.loRa,
-            loRa_rank=lora_rank,
-            loRa_alpha=loRa_alpha,
-            loRa_dropout=lora_dropout,
-        )
+        branch_3_conv2 = Unit3Dpy(in_channels, out_channels[5], kernel_size=(1, 1, 1))
         self.branch_3 = torch.nn.Sequential(branch_3_pool, branch_3_conv2)
 
-        # if self.adapter:
-        #     width = (
-        #         out_channels[0] + out_channels[2] + out_channels[4] + out_channels[5]
-        #     )
-        #     self.tuning_module = ConvAdapter(
-        #         width,
-        #         width,
-        #         kernel_size=(3, 3, 3),
-        #         padding=1,
-        #         width=int(width // 4),
-        #         groups=int(width // 4),
-        #         dilation=1,
-        #         act_layer=nn.ReLU,
-        #     )
+        if self.adapter:
+
+            width = (
+                out_channels[0] + out_channels[2] + out_channels[4] + out_channels[5]
+            )
+            self.tuning_module = ConvAdapter(
+                width,
+                width,
+                kernel_size=(3, 3, 3),
+                padding=1,
+                width=int(width // 4),
+                groups=int(width // 4),
+                dilation=1,
+                act_layer=nn.ReLU,
+            )
 
     def forward(self, inp):
         out_0 = self.branch_0(inp)
-        out_1_0 = self.branch_1[0](inp)
-        with torch.no_grad():
-            out_1 = self.branch_1[1](out_1_0)
-        out_2_0 = self.branch_2[0](inp)
-        with torch.no_grad():
-            out_2 = self.branch_2[1](out_2_0)
-        with torch.no_grad():
-            out_3_0 = self.branch_3[0](inp)
-        out_3 = self.branch_3[1](out_3_0)
+        out_1 = self.branch_1(inp)
+        out_2 = self.branch_2(inp)
+        out_3 = self.branch_3(inp)
         out = torch.cat((out_0, out_1, out_2, out_3), 1)
+        if self.adapter:
+
+            out_adapt = self.tuning_module(out)
+            out = out + out_adapt
 
         return out
 
@@ -381,21 +291,21 @@ class I3D(torch.nn.Module):
         self.maxPool3d_3a_3x3 = MaxPool3dTFPadding(
             kernel_size=(1, 3, 3), stride=(1, 2, 2), padding="SAME"
         )
-        # Mixed_3b
 
-        self.mixed_3b = Mixed(192, [64, 96, 128, 16, 32, 32], loRa=True)
-        self.mixed_3c = Mixed(256, [128, 128, 192, 32, 96, 64], loRa=True)
+        # Mixed_3b
+        self.mixed_3b = Mixed(192, [64, 96, 128, 16, 32, 32], adapter=True)
+        self.mixed_3c = Mixed(256, [128, 128, 192, 32, 96, 64], adapter=True)
 
         self.maxPool3d_4a_3x3 = MaxPool3dTFPadding(
             kernel_size=(3, 3, 3), stride=(2, 2, 2), padding="SAME"
         )
 
         # Mixed 4
-        self.mixed_4b = Mixed(480, [192, 96, 208, 16, 48, 64], loRa=True)
-        self.mixed_4c = Mixed(512, [160, 112, 224, 24, 64, 64], loRa=True)
-        self.mixed_4d = Mixed(512, [128, 128, 256, 24, 64, 64], loRa=True)
-        self.mixed_4e = Mixed(512, [112, 144, 288, 32, 64, 64], loRa=True)
-        self.mixed_4f = Mixed(528, [256, 160, 320, 32, 128, 128], loRa=True)
+        self.mixed_4b = Mixed(480, [192, 96, 208, 16, 48, 64], adapter=True)
+        self.mixed_4c = Mixed(512, [160, 112, 224, 24, 64, 64], adapter=True)
+        self.mixed_4d = Mixed(512, [128, 128, 256, 24, 64, 64], adapter=True)
+        self.mixed_4e = Mixed(512, [112, 144, 288, 32, 64, 64], adapter=True)
+        self.mixed_4f = Mixed(528, [256, 160, 320, 32, 128, 128], adapter=True)
 
         self.maxPool3d_5a_2x2 = MaxPool3dTFPadding(
             kernel_size=(2, 2, 2), stride=(2, 2, 2), padding="SAME"
@@ -423,26 +333,23 @@ class I3D(torch.nn.Module):
 
     def forward(self, inp):
         # Preprocessing
-        with torch.no_grad():
-            out = self.conv3d_1a_7x7(inp)
-            out = self.maxPool3d_2a_3x3(out)
-            out = self.conv3d_2b_1x1(out)
-            out = self.conv3d_2c_3x3(out)
-            out = self.maxPool3d_3a_3x3(out)
+        out = self.conv3d_1a_7x7(inp)
+        out = self.maxPool3d_2a_3x3(out)
+        out = self.conv3d_2b_1x1(out)
+        out = self.conv3d_2c_3x3(out)
+        out = self.maxPool3d_3a_3x3(out)
         out = self.mixed_3b(out)
         out = self.mixed_3c(out)
-        with torch.no_grad():
-            out = self.maxPool3d_4a_3x3(out)
+        out = self.maxPool3d_4a_3x3(out)
         out = self.mixed_4b(out)
         out = self.mixed_4c(out)
         out = self.mixed_4d(out)
         out = self.mixed_4e(out)
         out = self.mixed_4f(out)
-        with torch.no_grad():
-            out = self.maxPool3d_5a_2x2(out)
-            out = self.mixed_5b(out)
-            out = self.mixed_5c(out)
-            feature = self.avg_pool(out)
+        out = self.maxPool3d_5a_2x2(out)
+        out = self.mixed_5b(out)
+        out = self.mixed_5c(out)
+        feature = self.avg_pool(out)
         return feature
 
     def load_tf_weights(self, sess):
@@ -564,14 +471,9 @@ def load_conv3d(state_dict, name_pt, sess, name_tf, bias=False, bn=True):
             conv_bias,
         ) = conv_params
     else:
-        (
-            conv_weights,
-            kernel_shape,
-            in_channels,
-            out_channels,
-            strides,
-            padding,
-        ) = conv_params
+        conv_weights, kernel_shape, in_channels, out_channels, strides, padding = (
+            conv_params
+        )
 
     conv_weights_rs = np.transpose(
         conv_weights, (4, 3, 0, 1, 2)

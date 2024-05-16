@@ -117,6 +117,7 @@ class Unit3Dpy(torch.nn.Module):
         self.loRa_dropout = loRa_dropout
         self.merge_weights = merge_weights
         if loRa and loRa_rank > 0:
+            self.m = nn.Parameter(self.conv3d.weight.norm(p=2, dim=0, keepdim=True))
             self.loRa_A = nn.Parameter(
                 self.conv3d.weight.new_zeros(
                     (loRa_rank * kernel_size[0], in_channels * kernel_size[1])
@@ -154,11 +155,16 @@ class Unit3Dpy(torch.nn.Module):
             inp = self.pad(inp)
         # loRa
         if self.loRa_rank > 0 and self.loRa:
+            lora = (self.loRa_B @ self.loRa_A).view(
+                self.conv3d.weight.shape
+            ) * self.scaling
+            numerator = self.conv3d.weight + lora
+            denominator = numerator.norm(p=2, dim=0, keepdim=True)
+            directional_component = numerator / denominator
+            new_weight = self.m * directional_component
             out = self.conv3d._conv_forward(
                 inp,
-                self.conv3d.weight
-                + (self.loRa_B @ self.loRa_A).view(self.conv3d.weight.shape)
-                * self.scaling,
+                new_weight,
                 self.conv3d.bias,
             )
         else:
@@ -296,10 +302,6 @@ class I3D(torch.nn.Module):
             kernel_size=(7, 7, 7),
             stride=(2, 2, 2),
             padding="SAME",
-            loRa=True,
-            loRa_rank=8,
-            loRa_alpha=16,
-            loRa_dropout=0.5,
         )
         # 1st conv-pool
         self.conv3d_1a_7x7 = conv3d_1a_7x7
@@ -370,7 +372,6 @@ class I3D(torch.nn.Module):
         self.mixed_4f.unf_lora()
         self.mixed_5b.unf_lora()
         self.mixed_5c.unf_lora()
-        self.conv3d_1a_7x7.unf_lora()
 
     def forward(self, inp):
         # Preprocessing

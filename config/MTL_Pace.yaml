@@ -1,0 +1,26 @@
+height: 256
+width: 256
+ckpts: /home/ksr/PECoP/pretrained_weights/model_rgb.pth
+clip_len: 64
+crop_sz: 224
+
+
+# optimizer
+learn_rate: 0.01
+weight_decay: 1e-4
+momentum: 0.9
+dampening: 0
+nesterov: False
+# scheduler
+T_max: 22
+
+
+bs_train: 8
+bs_test: 8
+num_workers: 4
+epoch: 8
+max_sample_rate: 5
+max_save: 100
+pf: 20
+model: i3d
+data_root: /home/zkl/Documents/Data/AQA/Sequence/MTL-AQA

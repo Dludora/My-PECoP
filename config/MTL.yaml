@@ -1,9 +1,7 @@
-gpu: 2,3
-exp_name: MTL-I3D_USDL
 height: 256
 width: 256
-ckpts: /home/ksr/PECoP/pretrained_weights/i3d_for_USDL.pt
-clip_len: 80
+ckpts: /home/ksr/PECoP/pretrained_weights/model_rgb.pth
+clip_len: 48
 crop_sz: 224
 
 
@@ -17,16 +15,14 @@ nesterov: False
 T_max: 22
 
 
-bs_train: 32
-bs_test: 64
+bs_train: 16
+bs_test: 16
 num_workers: 4
-epoch: 24
+epoch: 8
 max_sample_rate: 5
 max_segment: 4
 fr: 1
 max_save: 100
 pf: 20
 model: i3d
-data_list: /home/amir/AQA/Datasets/PD/30_subjects_frames/frames/gait/label/train.list
-rgb_prefix: /home/amir/AQA/Datasets/PD/30_subjects_frames/frames/
 data_root: /home/zkl/Documents/Data/AQA/Sequence/MTL-AQA

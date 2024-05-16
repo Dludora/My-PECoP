@@ -83,8 +83,8 @@ class Processor(object):
         )
         train_dataset = Dataset(
             args=self.args,
-            transforms_=train_trans,
-            color_jitter_=color_jitter,
+            transforms=train_trans,
+            color_jitter=color_jitter,
             subset="train",
         )
         if self.args.subset == "train":
@@ -99,8 +99,8 @@ class Processor(object):
         test_trans, color_jitter = self.get_transforms(subset="test")
         test_dataset = Dataset(
             args=self.args,
-            transforms_=test_trans,
-            color_jitter_=color_jitter,
+            transforms=test_trans,
+            color_jitter=color_jitter,
             subset="test",
         )
         self.dataloader["test"] = DataLoader(
@@ -147,18 +147,38 @@ class Processor(object):
     def load_model(self):
         os.environ["CUDA_VISIBLE_DEVICES"] = self.args.gpu
         self.logger.info("Load model.")
-        Model = misc.import_class(f"models.VSPP.VSPP")
-        self.base_model = Model(
-            num_classes_p=self.args.max_sample_rate,
-            num_classes_s=self.args.max_segment,
-        ).cuda()
-        if torch.cuda.device_count() > 1:
-            self.base_model = nn.DataParallel(self.base_model)
+        Model = misc.import_class(f"models.VideoPace.VideoPace")
+        if self.args.benchmark == "MTL_Pace":
+            self.base_model = (
+                Model(
+                    num_classes_p=self.args.max_sample_rate,
+                ).cuda()
+                if torch.cuda.is_available()
+                else Model(
+                    num_classes_p=self.args.max_sample_rate,
+                )
+            )
+        else:
+            self.base_model = (
+                Model(
+                    num_classes_p=self.args.max_sample_rate,
+                    num_classes_s=self.args.max_segment,
+                ).cuda()
+                if torch.cuda.is_available()
+                else Model(
+                    num_classes_p=self.args.max_sample_rate,
+                    num_classes_s=self.args.max_segment,
+                )
+            )
         self.logger.info(f"{len(self.args.gpu.split(','))} GPUs are used.")
 
     def load_loss(self):
         self.logger.info("Load loss.")
-        self.criterion = nn.CrossEntropyLoss().cuda()
+        self.criterion = (
+            nn.CrossEntropyLoss().cuda()
+            if torch.cuda.is_available()
+            else nn.CrossEntropyLoss()
+        )
 
     def get_optimizer_scheduler(self):
         self.logger.info("Get optimizer and scheduler.")
@@ -187,7 +207,7 @@ class Processor(object):
                 raise FileNotFoundError
 
             self.logger.info(f"Load checkpoint file {self.args.ckpts}.")
-            self.base_model.module.load_pretrained_i3d(self.args.ckpts)
+            self.base_model.load_pretrained_i3d(self.args.ckpts)
             # initial params
             self.start_epoch = 0
             self.epoch_best = 0
@@ -215,6 +235,11 @@ class Processor(object):
             self.avg_best = state_dict["avg_best"]
             self.loss_best = state_dict["loss_best"]
 
+        # 设置多卡
+        if torch.cuda.device_count() > 1:
+            print("Using", torch.cuda.device_count(), "GPUs!")
+            self.base_model = nn.DataParallel(self.base_model)
+
     def save_checkpoint(self, epoch, best=False):
         if best:
             ckpt_file = os.path.join(self.args.exp_path, "weights/best.pth")
@@ -227,8 +252,14 @@ class Processor(object):
         if not os.path.exists(os.path.dirname(ckpt_file)):
             os.makedirs(os.path.dirname(ckpt_file))
 
+        # 判断是否使用了多卡
+        model = (
+            self.base_model.module
+            if isinstance(self.base_model, nn.DataParallel)
+            else self.base_model
+        )
         state_dict = {
-            "model": self.base_model.state_dict(),
+            "model": model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "epoch": epoch,
@@ -238,6 +269,104 @@ class Processor(object):
         }
         torch.save(state_dict, ckpt_file)
 
+    def train_pace(self, epoch):
+        total_loss = 0.0
+        correct = 0
+        it = 0
+
+        self.base_model.train()
+        loader = self.dataloader["train"]
+        process = tqdm(loader, dynamic_ncols=True)
+        for idx, sample in enumerate(process):
+            rgb_clip, label_speed = sample
+            rgb_clip = rgb_clip.to(dtype=torch.float).cuda()
+            label_speed = label_speed.cuda()
+            
+            self.optimizer.zero_grad()
+            out = self.base_model(rgb_clip)
+            loss = self.criterion(out, label_speed)
+
+            total_loss += loss.item()
+            loss.backward()
+            self.optimizer.step()
+
+            probs_speed = nn.Softmax(dim=1)(out)
+            preds_speed = torch.max(probs_speed, 1)[1]
+            accuracy_speed = (
+                torch.sum(preds_speed == label_speed.data)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(float)
+            )
+            accuracy = (accuracy_speed / 2) / self.args.bs_train
+            correct += accuracy
+            it += 1
+
+            process.set_description(
+                f"Epoch {epoch+1} | Loss: {loss.item()} | Acc: {accuracy}"
+            )
+            process.update()
+
+        process.close()
+
+        # analyze the results
+        avg_loss = total_loss / it
+        avg_acc = correct / it
+        self.history["train"].append((avg_loss, avg_acc))
+        self.logger.info(
+            f"Train: Epoch {epoch+1} | Loss: {avg_loss} | Acc: {avg_acc} | lr: {self.scheduler.get_last_lr()}"
+        )
+
+        if self.scheduler is not None:
+            self.scheduler.step()
+
+    def eval_pace(self, epoch):
+        self.base_model.eval()
+        loader = self.dataloader["test"]
+
+        total_loss = 0.0
+        correct = 0
+        it = 0
+
+        process = tqdm(loader, dynamic_ncols=True)
+        with torch.no_grad():
+            for idx, sample in enumerate(process):
+                rgb_clip, label = sample
+                rgb_clip = rgb_clip.to(dtype=torch.float).cuda()
+                label_speed = label.cuda()
+
+                out = self.base_model(rgb_clip)
+                loss = self.criterion(out, label_speed)
+
+                total_loss += loss.item()
+
+                probs_speed = nn.Softmax(dim=1)(out)
+                preds_speed = torch.max(probs_speed, 1)[1]
+                accuracy_speed = (
+                    torch.sum(preds_speed == label_speed.data)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(float)
+                )
+                accuracy = accuracy_speed / self.args.bs_test
+                correct += accuracy
+                it += 1
+
+                process.set_description(f"Test | Loss: {loss.item()} | Acc: {accuracy}")
+                process.update()
+
+        process.close()
+
+        avg_loss = total_loss / it
+        avg_acc = correct / it
+        self.history["test"].append((avg_loss, avg_acc))
+        self.logger.info(f"Test: Loss: {avg_loss} | Acc: {avg_acc}")
+
+        best = avg_acc > self.avg_best
+        self.save_checkpoint(epoch, best=best)
+
     def train(self, epoch):
         total_loss = 0.0
         correct = 0
@@ -246,7 +375,6 @@ class Processor(object):
         self.base_model.train()
         loader = self.dataloader["train"]
         process = tqdm(loader, dynamic_ncols=True)
-
         for idx, sample in enumerate(process):
             rgb_clip, labels = sample
             rgb_clip = rgb_clip.to(dtype=torch.float).cuda()
@@ -372,12 +500,12 @@ class Processor(object):
                     f"[ Epoch {epoch} start. ]"
                     f"--------------------------------------+"
                 )
-                self.train(epoch)
-                self.eval(epoch)
+                self.train_pace(epoch)
+                self.eval_pace(epoch)
                 self.logger.info(
                     f"+--------------------------------------"
                     f"[ Epoch {epoch} end. ]"
                     f"--------------------------------------+"
                 )
         else:
-            self.eval(0)
+            self.eval_pace(0)

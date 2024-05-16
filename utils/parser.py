@@ -15,7 +15,7 @@ class Parser:
         parser = argparse.ArgumentParser()
 
         parser.add_argument(
-            "--benchmark", choices=["MTL", "Seven", "JIGSAWS"], help="dataset name"
+            "--benchmark", choices=["MTL", "Seven", "MTL_Pace"], help="dataset name"
         )
         parser.add_argument(
             "--resume",
@@ -23,17 +23,26 @@ class Parser:
             help="autoresume training from exp dir (interrupted by accident)",
         )
         parser.add_argument(
+            "--exp_name", default="default", help="experiment name for this run"
+        )
+        parser.add_argument(
             "--subset", default="train", choices=["train", "test"], help="train or test"
         )
+        parser.add_argument(
+            "--class_idx",
+            type=int,
+            default=1,
+            choices=[1, 2, 3, 4, 5, 6],
+            help="class index for AQA-7",
+        )
+        parser.add_argument("--gpu", type=str, help="gpu id for training and testing")
         args = parser.parse_args()
 
         self.args = args
 
     def setup(self):
         # load config
-        self.args.config_path = pardir + "/config/{}_Config.yaml".format(
-            self.args.benchmark
-        )
+        self.args.config_path = pardir + "/config/{}.yaml".format(self.args.benchmark)
         self.get_config()
         self.merge_config()
 
@@ -51,7 +60,17 @@ class Parser:
             setattr(self.args, key, val)
 
     def check_config(self):
-        assert self.args.benchmark in ["MTL", "Seven", "JIGSAWS"]
+        assert self.args.benchmark in ["MTL", "Seven", "MTL_Pace"]
         self.args.exp_path = os.path.join(
             pardir, "exps", self.args.benchmark, self.args.exp_name
         )
+        if self.args.benchmark == "Seven":
+            print(f"Using CLASS idx {self.args.class_idx}")
+            self.args.exp_path = os.path.join(
+                self.args.exp_path, str(self.args.class_idx)
+            )
+        if self.args.benchmark == "JIGSAWS":
+            print(f"Using CLASS idx {self.args.class_idx}")
+            self.args.exp_path = os.path.join(
+                self.args.exp_path, str(self.args.class_idx) + "_" + str(self.args.fold)
+            )
